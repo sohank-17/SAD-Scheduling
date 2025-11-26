@@ -110,13 +110,26 @@ def calculations(kernel_data, processes_data):
     average_wait_time = 0
     median_wait_time = 0
     wait_time = []
+    process_total_runtime = 0
+    prev_finish = 0
 
-    for proc in processes_data:
+    for i in range(0, len(processes_data)):
+        proc = processes_data[i]
+
         # Calculate wait time. Currently uses each entry of the process as opposed
         # to each process themselves
         wait = proc.start_ms - proc.release_ms
         wait_time.append(wait)
         average_wait_time += wait
+
+        # Calculate run time/cpu time
+        #if (i == 0):
+        #    prev_finish = proc.finish_ms
+        #elif (i < len(processes_data) - 1):
+        #    print(str(prev_finish) + " " + str(proc.start_ms))
+        #    process_total_runtime += proc.start_ms - prev_finish
+        #    prev_finish = proc.finish_ms
+        process_total_runtime += proc.finish_ms - proc.start_ms
 
         # Set flag for if a deadline was missed
         # -> does a deadline being missed ever mean the process just didn't finish? (assuming no)
@@ -126,6 +139,11 @@ def calculations(kernel_data, processes_data):
     average_wait_time = average_wait_time/len(processes_data)
     median_wait_time = median(wait_time)
     
+    # Might need to calculate the total runtime. Unsure of if we should start the timer at 0 or when the first process executes
+    # For reference, the current line of code below calculates assuming the start is 0
+    #scheduler_overhead_time = processes_data[-1].finish_ms - process_total_runtime
+    scheduler_overhead_time = processes_data[-1].finish_ms - processes_data[0].release_ms - process_total_runtime
+
     # If we implement kernel snapshots at many points in time
     #for each kernel snapshot
         # Tasks in Queue v.s. Cores
@@ -136,7 +154,8 @@ def calculations(kernel_data, processes_data):
              "Average Wait Time (ms)": average_wait_time,
              "Median Wait Time (ms)" : median_wait_time,
              "Max Number of Tasks in Queue" : kernel_data[0].readyq_max,
-             "Tasks in Queue at Completion": kernel_data[0].readyq_cur}
+             "Tasks in Queue at Completion": kernel_data[0].readyq_cur,
+             "Scheduler Overhead (ms)": scheduler_overhead_time}
     graphs = {"Wait Time per Process": [range(0, len(processes_data)),wait_time,"Process","Time (ms)"]}
     return stats, graphs
 
@@ -153,7 +172,8 @@ def calculations(kernel_data, processes_data):
 #       the x array and y array.
 # *****************************************************************************
 def output(stats, graphs):
-    # Do all graph things here. Just spawn all of them
+    # Creates and displays each graph
+    #   Graph 1: Wait time per process
     for key in graphs.keys():
         plt.plot(graphs[key][0], graphs[key][1])
         plt.title(key)
