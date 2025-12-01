@@ -362,17 +362,20 @@ static bool vruntime_before(uint64_t a, uint64_t b)
 static bool z_priq_cfs_lessthan(struct rbnode *a, struct rbnode *b)
 {
 	if (!a || !b) {
-        return false;
-    }
+		return false;
+	}
 
 	struct k_thread *t_a = CONTAINER_OF(a, struct k_thread, base.qnode_rb);
 	struct k_thread *t_b = CONTAINER_OF(b, struct k_thread, base.qnode_rb);
 
-	/* 
-	 * In a production CFS, you handle u64 overflow/wraparound here.
-	 * Simple comparison: return true if A should come before B.
-	 */
-	return vruntime_before(t_a->base.vruntime, t_b->base.vruntime);
+	/* Compare vruntime first */
+	if (t_a->base.vruntime != t_b->base.vruntime) {
+		return vruntime_before(t_a->base.vruntime, t_b->base.vruntime);
+	}
+	
+	/* CRITICAL: If vruntime is equal, use thread pointer as tiebreaker */
+	/* Without this, rbtree operations FAIL when threads have same vruntime */
+	return (uintptr_t)t_a < (uintptr_t)t_b;
 }
 
 static ALWAYS_INLINE void z_priq_cfs_init(struct _priq_cfs *pq)
@@ -388,6 +391,7 @@ static ALWAYS_INLINE void z_priq_cfs_init(struct _priq_cfs *pq)
 
 static ALWAYS_INLINE void z_priq_cfs_add(struct _priq_cfs *pq, struct k_thread *thread)
 {
+	// printk("CFS_ADD: thread=%p\n", thread);
 	if (!pq || !thread) {
         return;
     }
@@ -409,25 +413,54 @@ static ALWAYS_INLINE void z_priq_cfs_add(struct _priq_cfs *pq, struct k_thread *
 
 static ALWAYS_INLINE void z_priq_cfs_remove(struct _priq_cfs *pq, struct k_thread *thread)
 {
+	// printk("CFS_REMOVE: thread=%p\n", thread);
+	// if (!pq || !thread) {
+    //     return;
+    // }
+	// rb_remove(&pq->tree, &thread->base.qnode_rb);
+	// pq->nr_running--;
+	// /*
+	//  * Update the queue's monotonic min_vruntime.
+	//  * If the tree is not empty, the new minimum is the left-most node.
+	//  * We only increase min_vruntime, never decrease it.
+	//  */
+	// struct rbnode *min_node = rb_get_min(&pq->tree);
+	
+	// if (min_node) {
+	// 	struct k_thread *next_thread = 
+	// 		CONTAINER_OF(min_node, struct k_thread, base.qnode_rb);
+		
+	// 	if (next_thread->base.vruntime > pq->min_vruntime) {
+	// 		pq->min_vruntime = next_thread->base.vruntime;
+	// 	}
+	// }
+
+	// printk("CFS_REMOVE: thread=%p, tree.root=%p before remove\n", thread, pq->tree.root);
+	
 	if (!pq || !thread) {
-        return;
-    }
+		return;
+	}
+	
 	rb_remove(&pq->tree, &thread->base.qnode_rb);
 	pq->nr_running--;
-	/*
-	 * Update the queue's monotonic min_vruntime.
-	 * If the tree is not empty, the new minimum is the left-most node.
-	 * We only increase min_vruntime, never decrease it.
-	 */
+	
+	// printk("CFS_REMOVE: tree.root=%p after remove, nr_running=%u\n", 
+	    //    pq->tree.root, pq->nr_running);
+	
+	/* Update min_vruntime */
 	struct rbnode *min_node = rb_get_min(&pq->tree);
 	
 	if (min_node) {
 		struct k_thread *next_thread = 
 			CONTAINER_OF(min_node, struct k_thread, base.qnode_rb);
+		// printk("CFS_REMOVE: new min thread=%p, vruntime=%llu\n",
+		    //    next_thread, next_thread->base.vruntime);
 		
 		if (next_thread->base.vruntime > pq->min_vruntime) {
 			pq->min_vruntime = next_thread->base.vruntime;
 		}
+	} else {
+		// printk("CFS_REMOVE: tree is now empty\n");
 	}
 }
 
@@ -451,22 +484,54 @@ static ALWAYS_INLINE void z_priq_cfs_yield(struct _priq_cfs *pq)
 
 static ALWAYS_INLINE struct k_thread *z_priq_cfs_best(struct _priq_cfs *pq)
 {
-	if (!pq) {
+	// if (!pq) {
 
-        return NULL;
-    }
+    //     return NULL;
+    // }
 
     
 
-	struct k_thread *thread = NULL;
-	struct rbnode *n = rb_get_min(&pq->tree);
-    if (!n) {
-        return NULL;
-    }
+	// struct k_thread *thread = NULL;
+	// struct rbnode *n = rb_get_min(&pq->tree);
+    // if (!n) {
+    //     return NULL;
+    // }
 
-	if (n != NULL) {
-		thread = CONTAINER_OF(n, struct k_thread, base.qnode_rb);
+	// if (n != NULL) {
+	// 	thread = CONTAINER_OF(n, struct k_thread, base.qnode_rb);
+	// }
+	// printk("CFS_BEST: thread=%p\n", thread);
+	// return thread;
+
+	// printk("CFS_BEST: enter\n");
+	
+	if (!pq) {
+		// printk("CFS_BEST: pq is NULL\n");
+		return NULL;
 	}
+
+	// printk("CFS_BEST: pq=%p, tree.root=%p, nr_running=%u\n", 
+	    //    pq, pq->tree.root, pq->nr_running);
+	
+	// Check if tree is empty
+	if (pq->tree.root == NULL) {
+		// printk("CFS_BEST: tree is empty (root=NULL)\n");
+		return NULL;
+	}
+	
+	struct rbnode *n = rb_get_min(&pq->tree);
+	
+	// printk("CFS_BEST: rb_get_min returned %p\n", n);
+	
+	if (n == NULL) {
+		// printk("CFS_BEST: rb_get_min returned NULL but tree.root=%p!\n", pq->tree.root);
+		return NULL;
+	}
+
+	struct k_thread *thread = CONTAINER_OF(n, struct k_thread, base.qnode_rb);
+	// printk("CFS_BEST: thread=%p, vruntime=%llu\n", 
+	//        thread, thread->base.vruntime);
+	
 	return thread;
 }
 #endif

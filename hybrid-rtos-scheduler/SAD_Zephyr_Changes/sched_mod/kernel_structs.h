@@ -130,7 +130,7 @@ struct _priq_mq {
 struct _priq_cfs {
 	struct rbtree tree;
 	uint64_t min_vruntime;
-	uint64_t nr_running; // number of processes running
+	uint32_t nr_running; // number of processes running
 };
 
 struct _ready_q {
@@ -147,7 +147,6 @@ struct _ready_q {
 	struct _priq_mq runq;
 #elif defined(CONFIG_SCHED_CFS)
 	struct _priq_cfs runq;
-	uint64_t vruntime;
 #endif
 };
 

@@ -164,6 +164,7 @@ void z_sched_cfs_tick_update(struct k_thread *thread)
 	
 	/* Update vruntime based on weight */
 	uint64_t delta_fair = cfs_calc_delta_fair(delta_ns, thread);
+	// printk("TiCK_UPDATE: updading thread vruntime: %d\n", delta_fair);
 	thread->base.vruntime += delta_fair;
 	
 	/* Update last start time */
@@ -207,6 +208,7 @@ bool z_sched_cfs_should_preempt(struct k_thread *curr)
  */
 void z_sched_cfs_thread_switch_out(struct k_thread *thread)
 {
+	// printk("SWITCH_OUT: here\n");
 	if (!thread || z_is_idle_thread_object(thread)) {
 		return;
 	}
@@ -263,6 +265,9 @@ static ALWAYS_INLINE void queue_thread(struct k_thread *thread)
 {
 	z_mark_thread_as_queued(thread);
 	if (should_queue_thread(thread)) {
+	#ifdef CONFIG_SCHED_CFS
+		z_sched_cfs_thread_switch_in(thread);
+	#endif
 		runq_add(thread);
 	#if defined(CONFIG_SCHED_DIAG)
 	        sched_diag_on_enqueue();
@@ -281,6 +286,19 @@ static ALWAYS_INLINE void dequeue_thread(struct k_thread *thread)
 	z_mark_thread_as_not_queued(thread);
 	if (should_queue_thread(thread)) {
 		runq_remove(thread);
+
+	#ifdef CONFIG_SCHED_CFS
+	// Safe to update vruntime now - thread is not in tree
+
+	z_sched_cfs_thread_switch_out(thread);
+	// if (!z_is_idle_thread_object(thread)) {
+	// 	uint32_t weight = cfs_thread_weight(thread);
+	// 	uint64_t delta = (10000ULL * 1024) / weight;
+	// 	thread->base.vruntime += delta;
+	// 	// printk("DEQUEUE: thread=%p, new vruntime=%llu\n", 
+	// 	// 		thread, thread->base.vruntime);
+	// }
+	#endif
 	#if defined(CONFIG_SCHED_DIAG)
         	sched_diag_on_dequeue();
 	#endif
@@ -899,9 +917,33 @@ void z_reschedule(struct k_spinlock *lock, k_spinlock_key_t key)
 		/* Update min_vruntime before potential context switch */
 		if (_current && !z_is_idle_thread_object(_current)) {
 			struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
+			printk("updating minruntime\n");
 			z_priq_cfs_update_min_vruntime(_current, pq);
+
+			// dont update vruntime here because the therad is still in the tree
+			// uint32_t weight = cfs_thread_weight(_current);
+			// uint64_t delta = (10000ULL * 1024) / weight;
+			// _current->base.vruntime += delta;
 		}
 	#endif
+	// #ifdef CONFIG_SCHED_CFS
+	// 	/* Update current thread's vruntime BEFORE reschedule */
+	// 	if (_current && !z_is_idle_thread_object(_current)) {
+	// 		// Simple increment
+	// 		uint32_t weight = cfs_thread_weight(_current);
+	// 		uint64_t delta = (10000ULL * 1024) / weight;
+	// 		_current->base.vruntime += delta;
+			
+	// 		printk("RESCHEDULE: updated vruntime for %p to %llu\n", 
+	// 		       _current, _current->base.vruntime);
+			
+	// 		// Update min_vruntime
+	// 		struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
+	// 		if (pq && _current->base.vruntime > pq->min_vruntime) {
+	// 			pq->min_vruntime = _current->base.vruntime;
+	// 		}
+	// 	}
+	// #endif
 
 	if (resched(key.key) && need_swap()) {
 		z_swap(lock, key);
@@ -1033,10 +1075,10 @@ static inline void set_current(struct k_thread *new_thread)
 void *z_get_next_switch_handle(void *interrupted)
 {
 	z_check_stack_sentinel();
-
+	printk("before smp\n");
 #ifdef CONFIG_SMP
 	void *ret = NULL;
-
+	printk("smp\n");
 	K_SPINLOCK(&_sched_spinlock) {
 		struct k_thread *old_thread = _current, *new_thread;
 		old_thread->switch_handle = NULL;
