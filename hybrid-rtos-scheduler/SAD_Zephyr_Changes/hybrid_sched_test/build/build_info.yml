@@ -1,0 +1,58 @@
+cmake:
+  application:
+    configuration-dir: '/home/dylan/stuff/zephyrproject/SAD-Scheduling/hybrid-rtos-scheduler/SAD_Zephyr_Changes/hybrid_sched_test'
+    source-dir: '/home/dylan/stuff/zephyrproject/SAD-Scheduling/hybrid-rtos-scheduler/SAD_Zephyr_Changes/hybrid_sched_test'
+  board:
+    name: 'qemu_x86'
+    path:
+     - '/home/dylan/stuff/zephyrproject/zephyr/boards/qemu/x86'
+    qualifiers: 'atom'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/bindings'
+    files:
+     - '/home/dylan/stuff/zephyrproject/zephyr/boards/qemu/x86/qemu_x86.dts'
+    include-dirs:
+     - '/home/dylan/stuff/zephyrproject/modules/hal/ambiq/dts'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/atmel/include'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/bouffalolab/include'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/bouffalolab/include/zephyr'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/gigadevice/include'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/microchip/include'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/microchip/dts'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/nuvoton/dts'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/nxp/dts'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/stm32/dts'
+     - '/home/dylan/stuff/zephyrproject/modules/hal/ti/dts'
+     - '/home/dylan/stuff/zephyrproject/zephyr/include'
+     - '/home/dylan/stuff/zephyrproject/zephyr/include/zephyr'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/common'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/vendor'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/rx'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/x86'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/xtensa'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/sparc'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/riscv'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/posix'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/arm64'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/arm'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts/arc'
+     - '/home/dylan/stuff/zephyrproject/zephyr/dts'
+  kconfig:
+    files:
+     - '/home/dylan/stuff/zephyrproject/zephyr/boards/qemu/x86/qemu_x86_defconfig'
+     - '/home/dylan/stuff/zephyrproject/SAD-Scheduling/hybrid-rtos-scheduler/SAD_Zephyr_Changes/hybrid_sched_test/prj.conf'
+    user-files:
+     - '/home/dylan/stuff/zephyrproject/SAD-Scheduling/hybrid-rtos-scheduler/SAD_Zephyr_Changes/hybrid_sched_test/prj.conf'
+  toolchain:
+    name: 'zephyr'
+    path: '/home/dylan/zephyr-sdk-0.17.4'
+  zephyr:
+    version: '4.3.99'
+    zephyr-base: '/home/dylan/stuff/zephyrproject/zephyr'
+version: '0.1.0'
+west:
+  command: '/home/dylan/stuff/zephyrproject/.venv/bin/west build -p always -b qemu_x86 .'
+  topdir: '/home/dylan/stuff/zephyrproject'
+  version: '1.5.0'

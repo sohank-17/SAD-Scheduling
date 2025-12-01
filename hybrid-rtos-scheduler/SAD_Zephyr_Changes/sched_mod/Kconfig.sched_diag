@@ -1,0 +1,9 @@
+# Lightweight scheduler diagnostics (off by default)
+menu "Scheduler diagnostics"
+config SCHED_DIAG
+    bool "Enable lightweight scheduler diagnostics"
+    help
+      Collects minimal counters (context switches, preemptions, ready-queue length)
+      with negligible overhead. No kernel printing; data is exposed via a small API.
+endmenu
+

@@ -104,6 +104,7 @@ void main(void) {
     int n = ARRAY_SIZE(TASKS);
     for (int i = 0; i < n; i++) {
         int prio = TASKS[i].critical ? 0 : 4;  /* Zephyr: lower (more negative) = higher priority */
+        printk("*** Creating Thread ***\n");
         k_tid_t tid = k_thread_create(
             &task_threads[i],
             task_stacks[i], K_THREAD_STACK_SIZEOF(task_stacks[i]),
@@ -115,6 +116,7 @@ void main(void) {
         k_thread_name_set(tid, name);
 	k_sleep(K_MSEC(20));  // stagger thread starts
     }
+    printk("here\n");
 
     /* Allow jobs to finish. Rough upper bound; adjust as needed. */
     k_sleep(K_SECONDS(5));
