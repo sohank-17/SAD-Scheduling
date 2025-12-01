@@ -1,5 +1,0 @@
-west:
-  command: /home/dylan/stuff/zephyrproject/.venv/bin/west build -p always -b qemu_x86
-    .
-  topdir: /home/dylan/stuff/zephyrproject
-  version: 1.5.0
