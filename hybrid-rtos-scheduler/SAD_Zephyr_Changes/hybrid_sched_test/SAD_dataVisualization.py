@@ -110,8 +110,8 @@ def calculations(kernel_data, processes_data):
     average_wait_time = 0
     median_wait_time = 0
     wait_time = []
-    process_total_runtime = 0
-    prev_finish = 0
+    overall_visual = []
+    num_total_threads = 0
 
     for i in range(0, len(processes_data)):
         proc = processes_data[i]
@@ -122,27 +122,18 @@ def calculations(kernel_data, processes_data):
         wait_time.append(wait)
         average_wait_time += wait
 
-        # Calculate run time/cpu time
-        #if (i == 0):
-        #    prev_finish = proc.finish_ms
-        #elif (i < len(processes_data) - 1):
-        #    print(str(prev_finish) + " " + str(proc.start_ms))
-        #    process_total_runtime += proc.start_ms - prev_finish
-        #    prev_finish = proc.finish_ms
-        process_total_runtime += proc.finish_ms - proc.start_ms
-
         # Set flag for if a deadline was missed
         # -> does a deadline being missed ever mean the process just didn't finish? (assuming no)
         if proc.deadline_met == 0:
             deadlines_missed += 1
+
+        # Add release time, start time, and finish time to an array for better visualization
+        overall_visual.append([[proc.release_ms, proc.start_ms, proc.finish_ms],[proc.task_id, proc.task_id, proc.task_id]])
+        if (proc.task_id > num_total_threads): num_total_threads = proc.task_id
     
     average_wait_time = average_wait_time/len(processes_data)
     median_wait_time = median(wait_time)
-    
-    # Might need to calculate the total runtime. Unsure of if we should start the timer at 0 or when the first process executes
-    # For reference, the current line of code below calculates assuming the start is 0
-    #scheduler_overhead_time = processes_data[-1].finish_ms - process_total_runtime
-    scheduler_overhead_time = processes_data[-1].finish_ms - processes_data[0].release_ms - process_total_runtime
+
 
     # If we implement kernel snapshots at many points in time
     #for each kernel snapshot
@@ -154,9 +145,9 @@ def calculations(kernel_data, processes_data):
              "Average Wait Time (ms)": average_wait_time,
              "Median Wait Time (ms)" : median_wait_time,
              "Max Number of Tasks in Queue" : kernel_data[0].readyq_max,
-             "Tasks in Queue at Completion": kernel_data[0].readyq_cur,
-             "Scheduler Overhead (ms)": scheduler_overhead_time}
-    graphs = {"Wait Time per Process": [range(0, len(processes_data)),wait_time,"Process","Time (ms)"]}
+             "Tasks in Queue at Completion": kernel_data[0].readyq_cur}
+    graphs = {"Wait Time per Process": [0, range(0, len(processes_data)),wait_time,"Process","Time (ms)"],
+              "Overview of Events": [1, overall_visual, range(0,num_total_threads),"Time (ms)","Task"]}
     return stats, graphs
 
 
@@ -172,13 +163,23 @@ def calculations(kernel_data, processes_data):
 #       the x array and y array.
 # *****************************************************************************
 def output(stats, graphs):
+    colors = ['b','m','g','c']
     # Creates and displays each graph
     #   Graph 1: Wait time per process
     for key in graphs.keys():
-        plt.plot(graphs[key][0], graphs[key][1])
+        # Standard plot. Assume given two arrays to graph directly
+        if (graphs[key][0] == 0):
+            plt.plot(graphs[key][1], graphs[key][2])
+        # More specialized plots below
+        # Graph 2: For each task, plot the lifecycle of each job
+        elif (graphs[key][0] == 1):
+            for i in range(0,len(graphs[key][1])):
+                plt.plot(graphs[key][1][i][0], graphs[key][1][i][1], marker='.',color=colors[graphs[key][1][i][1][0]])
+            
+        # Standard across all graphs
         plt.title(key)
-        plt.xlabel(graphs[key][2])
-        plt.ylabel(graphs[key][3])
+        plt.xlabel(graphs[key][3])
+        plt.ylabel(graphs[key][4])
         plt.show()
 
     # To be printed to the console
