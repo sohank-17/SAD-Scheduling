@@ -854,3 +854,856 @@ index c0ba534d59a..cf95a13f7b9 100644
  		}
  		z_reset_time_slice(curr);
  	}
+diff --git a/Kconfig b/Kconfig
+index 7cfc73054d5..2694d52ab3c 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -6,3 +6,4 @@
+ mainmenu "Zephyr Kernel Configuration"
+ 
+ source "Kconfig.zephyr"
++rsource "Kconfig.sched_diag"
+diff --git a/include/zephyr/kernel/thread.h b/include/zephyr/kernel/thread.h
+index c7bd6b31b0b..c946c2fb36b 100644
+--- a/include/zephyr/kernel/thread.h
++++ b/include/zephyr/kernel/thread.h
+@@ -93,6 +93,11 @@ struct _thread_base {
+ 	int prio_deadline;
+ #endif /* CONFIG_SCHED_DEADLINE */
+ 
++#ifdef CONFIG_SCHED_CFS
++	uint64_t vruntime;
++	uint64_t last_start_time; /* calculate delta when swapping out*/
++#endif
++
+ #if defined(CONFIG_SCHED_SCALABLE) || defined(CONFIG_WAITQ_SCALABLE)
+ 	uint32_t order_key;
+ #endif
+@@ -273,6 +278,8 @@ struct k_thread {
+ 	/** threads waiting in k_thread_join() */
+ 	_wait_q_t join_queue;
+ 
++
++
+ #if defined(CONFIG_POLL)
+ 	struct z_poller poller;
+ #endif /* CONFIG_POLL */
+diff --git a/include/zephyr/kernel_structs.h b/include/zephyr/kernel_structs.h
+index be883530b84..77172574dcd 100644
+--- a/include/zephyr/kernel_structs.h
++++ b/include/zephyr/kernel_structs.h
+@@ -127,6 +127,12 @@ struct _priq_mq {
+ #endif
+ };
+ 
++struct _priq_cfs {
++	struct rbtree tree;
++	uint64_t min_vruntime;
++	uint32_t nr_running; // number of processes running
++};
++
+ struct _ready_q {
+ #ifndef CONFIG_SMP
+ 	/* always contains next thread to run: cannot be NULL */
+@@ -139,6 +145,8 @@ struct _ready_q {
+ 	struct _priq_rb runq;
+ #elif defined(CONFIG_SCHED_MULTIQ)
+ 	struct _priq_mq runq;
++#elif defined(CONFIG_SCHED_CFS)
++	struct _priq_cfs runq;
+ #endif
+ };
+ 
+diff --git a/kernel/CMakeLists.txt b/kernel/CMakeLists.txt
+index 8906da2f627..2c392135ef2 100644
+--- a/kernel/CMakeLists.txt
++++ b/kernel/CMakeLists.txt
+@@ -89,8 +89,11 @@ kernel_sources_ifdef(CONFIG_MULTITHREADING
+   condvar.c
+   thread.c
+   sched.c
++  sched_diag.c
+   pipe.c
+   )
++zephyr_library_sources_ifdef(CONFIG_SCHED_DIAG sched_diag.c)
++
+ 
+ if(CONFIG_MULTITHREADING)
+ if(CONFIG_SCHED_SCALABLE OR CONFIG_WAITQ_SCALABLE)
+diff --git a/kernel/Kconfig b/kernel/Kconfig
+index c4bab69f484..d71a92609e0 100644
+--- a/kernel/Kconfig
++++ b/kernel/Kconfig
+@@ -355,6 +355,13 @@ config SCHED_MULTIQ
+ 	  of threads.  Typical applications with small numbers of runnable
+ 	  threads probably want the simple scheduler.
+ 
++# Enable CFS Scheduler
++config SCHED_CFS
++    bool "Enable CFS Scheduler"
++    help
++      Enables the CFS Scheduler
++
++
+ endchoice # SCHED_ALGORITHM
+ 
+ config WAITQ_DUMB
+diff --git a/kernel/include/ksched.h b/kernel/include/ksched.h
+index 40168b006f0..c847408146f 100644
+--- a/kernel/include/ksched.h
++++ b/kernel/include/ksched.h
+@@ -338,6 +338,13 @@ static inline void z_sched_usage_switch(struct k_thread *thread)
+ #endif /* CONFIG_SCHED_THREAD_USAGE */
+ }
+ 
++#ifdef CONFIG_SCHED_CFS
++/**
++ * Check if the current thread should be preempted
++ */
++bool z_sched_cfs_should_preempt(struct k_thread *curr);
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/kernel/include/kswap.h b/kernel/include/kswap.h
+index cff3efab6e9..f383e5ca661 100644
+--- a/kernel/include/kswap.h
++++ b/kernel/include/kswap.h
+@@ -52,6 +52,10 @@ void z_smp_release_global_lock(struct k_thread *thread);
+  */
+ static inline void z_sched_switch_spin(struct k_thread *thread)
+ {
++
++#if defined(CONFIG_SCHED_DIAG)
++        sched_diag_on_context_switch(_current, thread);
++#endif
+ #ifdef CONFIG_SMP
+ 	volatile void **shp = (void *)&thread->switch_handle;
+ 
+diff --git a/kernel/include/priority_q.h b/kernel/include/priority_q.h
+index 4b49ce3ee22..88e243ea651 100644
+--- a/kernel/include/priority_q.h
++++ b/kernel/include/priority_q.h
+@@ -35,6 +35,13 @@
+ #define _priq_run_remove	z_priq_mq_remove
+ #define _priq_run_yield         z_priq_mq_yield
+ #define _priq_run_best		z_priq_mq_best
++/* CFS Scheduler */
++#elif defined(CONFIG_SCHED_CFS)
++#define _priq_run_init      z_priq_cfs_init
++#define _priq_run_add       z_priq_cfs_add
++#define _priq_run_remove    z_priq_cfs_remove
++#define _priq_run_yield     z_priq_cfs_yield
++#define _priq_run_best      z_priq_cfs_best
+ #endif
+ 
+ /* Scalable Wait Queue */
+@@ -346,4 +353,187 @@ static ALWAYS_INLINE struct k_thread *z_priq_mq_best(struct _priq_mq *pq)
+ 	return NULL;
+ }
+ 
++#ifdef CONFIG_SCHED_CFS
++static bool vruntime_before(uint64_t a, uint64_t b)
++{
++    return (int64_t)(a - b) < 0;
++}
++
++static bool z_priq_cfs_lessthan(struct rbnode *a, struct rbnode *b)
++{
++	if (!a || !b) {
++		return false;
++	}
++
++	struct k_thread *t_a = CONTAINER_OF(a, struct k_thread, base.qnode_rb);
++	struct k_thread *t_b = CONTAINER_OF(b, struct k_thread, base.qnode_rb);
++
++	/* Compare vruntime first */
++	if (t_a->base.vruntime != t_b->base.vruntime) {
++		return vruntime_before(t_a->base.vruntime, t_b->base.vruntime);
++	}
++	
++	/* CRITICAL: If vruntime is equal, use thread pointer as tiebreaker */
++	/* Without this, rbtree operations FAIL when threads have same vruntime */
++	return (uintptr_t)t_a < (uintptr_t)t_b;
++}
++
++static ALWAYS_INLINE void z_priq_cfs_init(struct _priq_cfs *pq)
++{
++	if (!pq) {
++        return;
++    }
++	pq->min_vruntime = 0;
++	pq->tree.root = NULL;
++	pq->nr_running = 0;
++	pq->tree.lessthan_fn = z_priq_cfs_lessthan;
++}
++
++static ALWAYS_INLINE void z_priq_cfs_add(struct _priq_cfs *pq, struct k_thread *thread)
++{
++	// printk("CFS_ADD: thread=%p\n", thread);
++	if (!pq || !thread) {
++        return;
++    }
++	/* 
++	 * CFS Fairness Logic:
++	 * If a thread wakes up after a long sleep, its vruntime might be 
++	 * significantly lower than the current execution pack. We clamp it 
++	 * to the queue's min_vruntime to prevent it from monopolizing the CPU 
++	 * (starvation of others) while still giving it a slight edge.
++	 */
++	if (thread->base.vruntime < pq->min_vruntime) {
++		thread->base.vruntime = pq->min_vruntime;
++	}
++
++
++	rb_insert(&pq->tree, &thread->base.qnode_rb);
++	pq->nr_running++;
++}
++
++static ALWAYS_INLINE void z_priq_cfs_remove(struct _priq_cfs *pq, struct k_thread *thread)
++{
++	// printk("CFS_REMOVE: thread=%p\n", thread);
++	// if (!pq || !thread) {
++    //     return;
++    // }
++	// rb_remove(&pq->tree, &thread->base.qnode_rb);
++	// pq->nr_running--;
++	// /*
++	//  * Update the queue's monotonic min_vruntime.
++	//  * If the tree is not empty, the new minimum is the left-most node.
++	//  * We only increase min_vruntime, never decrease it.
++	//  */
++	// struct rbnode *min_node = rb_get_min(&pq->tree);
++	
++	// if (min_node) {
++	// 	struct k_thread *next_thread = 
++	// 		CONTAINER_OF(min_node, struct k_thread, base.qnode_rb);
++		
++	// 	if (next_thread->base.vruntime > pq->min_vruntime) {
++	// 		pq->min_vruntime = next_thread->base.vruntime;
++	// 	}
++	// }
++
++	// printk("CFS_REMOVE: thread=%p, tree.root=%p before remove\n", thread, pq->tree.root);
++	
++	if (!pq || !thread) {
++		return;
++	}
++	
++	rb_remove(&pq->tree, &thread->base.qnode_rb);
++	pq->nr_running--;
++	
++	// printk("CFS_REMOVE: tree.root=%p after remove, nr_running=%u\n", 
++	    //    pq->tree.root, pq->nr_running);
++	
++	/* Update min_vruntime */
++	struct rbnode *min_node = rb_get_min(&pq->tree);
++	
++	if (min_node) {
++		struct k_thread *next_thread = 
++			CONTAINER_OF(min_node, struct k_thread, base.qnode_rb);
++		// printk("CFS_REMOVE: new min thread=%p, vruntime=%llu\n",
++		    //    next_thread, next_thread->base.vruntime);
++		
++		if (next_thread->base.vruntime > pq->min_vruntime) {
++			pq->min_vruntime = next_thread->base.vruntime;
++		}
++	} else {
++		// printk("CFS_REMOVE: tree is now empty\n");
++	}
++}
++
++static ALWAYS_INLINE void z_priq_cfs_yield(struct _priq_cfs *pq)
++{
++	if (!pq || !_current) {
++        return;
++    }
++	/* 
++	 * In CFS, yielding requires removing and re-inserting.
++	 * Note: The scheduler core (sched.c) MUST update the current
++	 * thread's 'vruntime' based on consumed ticks *before* calling yield,
++	 * otherwise the thread will simply be re-inserted at the front
++	 * of the tree.
++	 */
++#ifndef CONFIG_SMP
++	z_priq_cfs_remove(pq, _current);
++	z_priq_cfs_add(pq, _current);
++#endif
++}
++
++static ALWAYS_INLINE struct k_thread *z_priq_cfs_best(struct _priq_cfs *pq)
++{
++	// if (!pq) {
++
++    //     return NULL;
++    // }
++
++    
++
++	// struct k_thread *thread = NULL;
++	// struct rbnode *n = rb_get_min(&pq->tree);
++    // if (!n) {
++    //     return NULL;
++    // }
++
++	// if (n != NULL) {
++	// 	thread = CONTAINER_OF(n, struct k_thread, base.qnode_rb);
++	// }
++	// printk("CFS_BEST: thread=%p\n", thread);
++	// return thread;
++
++	// printk("CFS_BEST: enter\n");
++	
++	if (!pq) {
++		// printk("CFS_BEST: pq is NULL\n");
++		return NULL;
++	}
++
++	// printk("CFS_BEST: pq=%p, tree.root=%p, nr_running=%u\n", 
++	    //    pq, pq->tree.root, pq->nr_running);
++	
++	// Check if tree is empty
++	if (pq->tree.root == NULL) {
++		// printk("CFS_BEST: tree is empty (root=NULL)\n");
++		return NULL;
++	}
++	
++	struct rbnode *n = rb_get_min(&pq->tree);
++	
++	// printk("CFS_BEST: rb_get_min returned %p\n", n);
++	
++	if (n == NULL) {
++		// printk("CFS_BEST: rb_get_min returned NULL but tree.root=%p!\n", pq->tree.root);
++		return NULL;
++	}
++
++	struct k_thread *thread = CONTAINER_OF(n, struct k_thread, base.qnode_rb);
++	// printk("CFS_BEST: thread=%p, vruntime=%llu\n", 
++	//        thread, thread->base.vruntime);
++	
++	return thread;
++}
++#endif
++
+ #endif /* ZEPHYR_KERNEL_INCLUDE_PRIORITY_Q_H_ */
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 0c14cec5d5b..3611ab6f242 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -21,6 +21,7 @@
+ #include <zephyr/sys/math_extras.h>
+ #include <zephyr/timing/timing.h>
+ #include <zephyr/sys/util.h>
++#include <zephyr/sched_diag.h>
+ 
+ LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
+ 
+@@ -77,7 +78,6 @@ static ALWAYS_INLINE void *curr_cpu_runq(void)
+ static ALWAYS_INLINE void runq_add(struct k_thread *thread)
+ {
+ 	__ASSERT_NO_MSG(!z_is_idle_thread_object(thread));
+-	__ASSERT_NO_MSG(!is_thread_dummy(thread));
+ 
+ 	_priq_run_add(thread_runq(thread), thread);
+ }
+@@ -85,7 +85,6 @@ static ALWAYS_INLINE void runq_add(struct k_thread *thread)
+ static ALWAYS_INLINE void runq_remove(struct k_thread *thread)
+ {
+ 	__ASSERT_NO_MSG(!z_is_idle_thread_object(thread));
+-	__ASSERT_NO_MSG(!is_thread_dummy(thread));
+ 
+ 	_priq_run_remove(thread_runq(thread), thread);
+ }
+@@ -100,6 +99,165 @@ static ALWAYS_INLINE struct k_thread *runq_best(void)
+ 	return _priq_run_best(curr_cpu_runq());
+ }
+ 
++#ifdef CONFIG_SCHED_CFS
++
++#define CFS_LATENCY_NS     6000000ULL    /* 6ms target latency */
++#define CFS_MIN_GRAN_NS     750000ULL    /* 0.75ms minimum granularity */
++#define CFS_TICK_NS        1000000ULL    /* 1ms per tick (adjust based on CONFIG_SYS_CLOCK_TICKS_PER_SEC) */
++
++/* Priority to weight mapping (same as Linux) */
++static const uint32_t sched_prio_to_weight[40] = {
++	/* -20 to -16 */ 88761, 71755, 56483, 46273, 36291,
++	/* -15 to -11 */ 29154, 23254, 18705, 14949, 11916,
++	/* -10 to -6  */  9548,  7620,  6100,  4904,  3906,
++	/* -5  to -1  */  3121,  2501,  1991,  1586,  1277,
++	/*  0  to  4  */  1024,   820,   655,   526,   423,
++	/*  5  to  9  */   335,   272,   215,   172,   137,
++	/* 10  to 14  */   110,    87,    70,    56,    45,
++	/* 15  to 19  */    36,    29,    23,    18,    15,
++};
++
++void z_priq_cfs_update_min_vruntime(struct k_thread *curr, struct _priq_cfs *pq)
++{
++	if (curr && vruntime_before(pq->min_vruntime, curr->base.vruntime)) {
++        pq->min_vruntime = curr->base.vruntime;
++    }
++}
++
++static uint32_t cfs_thread_weight(struct k_thread *thread)
++{
++	/* Map Zephyr priority to CFS weight */
++	int prio = thread->base.prio;
++	int idx = CLAMP(prio + 20, 0, 39);
++	return sched_prio_to_weight[idx];
++}
++
++static uint64_t cfs_calc_delta_fair(uint64_t delta_ns, struct k_thread *thread)
++{
++	uint32_t weight = cfs_thread_weight(thread);
++	
++	/* vruntime_delta = (delta_ns * NICE_0_WEIGHT) / thread_weight */
++	return (delta_ns * 1024ULL) / weight;
++}
++
++void z_sched_cfs_tick_update(struct k_thread *thread)
++{
++	if (!thread || z_is_idle_thread_object(thread)) {
++		printk("idkle thread\n");
++		return;
++	}
++
++	/* Calculate elapsed time since last update */
++	uint64_t now = k_uptime_ticks();
++	
++	/* Initialize if first time */
++	if (thread->base.last_start_time == 0) {
++		printk("thread does not have a start time\n");
++		thread->base.last_start_time = now;
++		return;
++	}
++	
++	uint64_t delta_ticks = now - thread->base.last_start_time;
++	if (delta_ticks == 0) {
++		return;
++	}
++	
++	uint64_t delta_ns = k_ticks_to_ns_floor64(delta_ticks);
++	
++	/* Update vruntime based on weight */
++	uint64_t delta_fair = cfs_calc_delta_fair(delta_ns, thread);
++	// printk("TiCK_UPDATE: updading thread vruntime: %d\n", delta_fair);
++	thread->base.vruntime += delta_fair;
++	
++	/* Update last start time */
++	thread->base.last_start_time = now;
++	
++	/* Update runqueue min_vruntime */
++	struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
++	z_priq_cfs_update_min_vruntime(thread, pq);
++}
++
++
++/**
++ * Called when switching out a thread
++ */
++void z_sched_cfs_thread_switch_out(struct k_thread *thread)
++{
++	// printk("SWITCH_OUT: here\n");
++	if (!thread || z_is_idle_thread_object(thread)) {
++		return;
++	}
++	
++	/* Final vruntime update */
++	if (thread->base.last_start_time != 0) {
++	    z_sched_cfs_tick_update(thread);
++    }
++	
++	/* Reset so it doesn't accumulate while not running */
++	thread->base.last_start_time = 0;
++} 
++
++/**
++ * Called when switching in a thread
++ */
++void z_sched_cfs_thread_switch_in(struct k_thread *thread)
++{
++	if (!thread || z_is_idle_thread_object(thread)) {
++		return;
++	}
++	
++	/* Mark when thread starts running */
++	thread->base.last_start_time = k_uptime_ticks();
++}
++
++/**
++ * Initialize a new thread's CFS fields
++ */
++void z_sched_cfs_thread_init(struct k_thread *thread)
++{
++	struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
++	if (!pq) {
++		return;
++	}
++	/* New threads start with current min_vruntime */
++	thread->base.vruntime = pq->min_vruntime;
++	thread->base.last_start_time = 0;
++}
++
++bool z_sched_cfs_should_preempt(struct k_thread *curr) {
++	if (!curr || z_is_idle_thread_object(curr)) {
++		return false;
++	}
++
++	// update the vruntime of the current thead.
++	z_sched_cfs_tick_update(curr);
++	
++	struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
++	
++	/* Get the leftmost (lowest vruntime) thread */
++	struct rbnode *node = rb_get_min(&pq->tree);
++	if (!node) {
++		return false;
++	}
++	
++	struct k_thread *leftmost = CONTAINER_OF(node, struct k_thread, base.qnode_rb);
++	
++	/* Don't preempt if current has lowest vruntime */
++	printk("vruntime left: %d, vruntime curr: %d\n", leftmost->base.vruntime, curr->base.vruntime);
++	if (leftmost == curr) {
++		printk("this\n");
++		return false;
++	}
++	printk("not this\n");
++
++	/* Preempt if another thread has lower vruntime */
++	return vruntime_before(leftmost->base.vruntime, curr->base.vruntime);
++}
++
++#endif /* CONFIG_SCHED_CFS */
++
++
++
+ /* _current is never in the run queue until context switch on
+  * SMP configurations, see z_requeue_current()
+  */
+@@ -112,7 +270,13 @@ static ALWAYS_INLINE void queue_thread(struct k_thread *thread)
+ {
+ 	z_mark_thread_as_queued(thread);
+ 	if (should_queue_thread(thread)) {
++	#ifdef CONFIG_SCHED_CFS
++		z_sched_cfs_thread_switch_in(thread);
++	#endif
+ 		runq_add(thread);
++	#if defined(CONFIG_SCHED_DIAG)
++	        sched_diag_on_enqueue();
++	#endif
+ 	}
+ #ifdef CONFIG_SMP
+ 	if (thread == _current) {
+@@ -127,6 +291,22 @@ static ALWAYS_INLINE void dequeue_thread(struct k_thread *thread)
+ 	z_mark_thread_as_not_queued(thread);
+ 	if (should_queue_thread(thread)) {
+ 		runq_remove(thread);
++
++	#ifdef CONFIG_SCHED_CFS
++	// Safe to update vruntime now - thread is not in tree
++
++	z_sched_cfs_thread_switch_out(thread);
++	// if (!z_is_idle_thread_object(thread)) {
++	// 	uint32_t weight = cfs_thread_weight(thread);
++	// 	uint64_t delta = (10000ULL * 1024) / weight;
++	// 	thread->base.vruntime += delta;
++	// 	// printk("DEQUEUE: thread=%p, new vruntime=%llu\n", 
++	// 	// 		thread, thread->base.vruntime);
++	// }
++	#endif
++	#if defined(CONFIG_SCHED_DIAG)
++        	sched_diag_on_dequeue();
++	#endif
+ 	}
+ }
+ 
+@@ -241,11 +421,13 @@ static ALWAYS_INLINE struct k_thread *next_up(void)
+ #endif /* CONFIG_SMP */
+ }
+ 
+-void move_current_to_end_of_prio_q(void)
++void move_thread_to_end_of_prio_q(struct k_thread *thread)
+ {
+-	runq_yield();
+-
+-	update_cache(1);
++	if (z_is_thread_queued(thread)) {
++		dequeue_thread(thread);
++	}
++	queue_thread(thread);
++	update_cache(thread == _current);
+ }
+ 
+ /* Track cooperative threads preempted by metairqs so we can return to
+@@ -280,6 +462,7 @@ static ALWAYS_INLINE void update_cache(int preempt_ok)
+ 	if (should_preempt(thread, preempt_ok)) {
+ #ifdef CONFIG_TIMESLICING
+ 		if (thread != _current) {
++			sched_diag_on_preempt();
+ 			z_reset_time_slice(thread);
+ 		}
+ #endif /* CONFIG_TIMESLICING */
+@@ -350,11 +533,10 @@ void z_ready_thread(struct k_thread *thread)
+ 	}
+ }
+ 
+-/* This routine only used for testing purposes */
+-void z_yield_testing_only(void)
++void z_move_thread_to_end_of_prio_q(struct k_thread *thread)
+ {
+ 	K_SPINLOCK(&_sched_spinlock) {
+-		move_current_to_end_of_prio_q();
++		move_thread_to_end_of_prio_q(thread);
+ 	}
+ }
+ 
+@@ -734,11 +916,48 @@ static inline bool need_swap(void)
+ #endif /* CONFIG_SMP */
+ }
+ 
++
+ void z_reschedule(struct k_spinlock *lock, k_spinlock_key_t key)
+ {
++	#ifdef CONFIG_SCHED_CFS
++		/* Update min_vruntime before potential context switch */
++		if (_current && !z_is_idle_thread_object(_current)) {
++			struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
++			z_priq_cfs_update_min_vruntime(_current, pq);
++
++			// dont update vruntime here because the therad is still in the tree
++			// uint32_t weight = cfs_thread_weight(_current);
++			// uint64_t delta = (10000ULL * 1024) / weight;
++			// _current->base.vruntime += delta;
++		}
++	#endif
++	// #ifdef CONFIG_SCHED_CFS
++	// 	/* Update current thread's vruntime BEFORE reschedule */
++	// 	if (_current && !z_is_idle_thread_object(_current)) {
++	// 		// Simple increment
++	// 		uint32_t weight = cfs_thread_weight(_current);
++	// 		uint64_t delta = (10000ULL * 1024) / weight;
++	// 		_current->base.vruntime += delta;
++			
++	// 		printk("RESCHEDULE: updated vruntime for %p to %llu\n", 
++	// 		       _current, _current->base.vruntime);
++			
++	// 		// Update min_vruntime
++	// 		struct _priq_cfs *pq = ((struct _priq_cfs *)curr_cpu_runq());
++	// 		if (pq && _current->base.vruntime > pq->min_vruntime) {
++	// 			pq->min_vruntime = _current->base.vruntime;
++	// 		}
++	// 	}
++	// #endif
++
+ 	if (resched(key.key) && need_swap()) {
+ 		z_swap(lock, key);
+ 	} else {
++		
++		#if defined(CONFIG_SCHED_DIAG)
++                sched_diag_on_context_switch(_current, _kernel.ready_q.cache);
++                #endif
++
+ 		k_spin_unlock(lock, key);
+ 		signal_pending_ipi();
+ 	}
+@@ -756,9 +975,6 @@ void z_reschedule_irqlock(uint32_t key)
+ 
+ void k_sched_lock(void)
+ {
+-	LOG_DBG("scheduler locked (%p:%d)",
+-		_current, _current->base.sched_locked);
+-
+ 	K_SPINLOCK(&_sched_spinlock) {
+ 		SYS_PORT_TRACING_FUNC(k_thread, sched_lock);
+ 
+@@ -814,9 +1030,19 @@ static inline void set_current(struct k_thread *new_thread)
+ 	/* If the new thread is the same as the current thread, we
+ 	 * don't need to do anything.
+ 	 */
++	#if defined(CONFIG_SCHED_DIAG)
++        struct k_thread *prev = _current;
++        #endif
++	
+ 	if (IS_ENABLED(CONFIG_INSTRUMENT_THREAD_SWITCHING) && new_thread != _current) {
+ 		z_thread_mark_switched_out();
+ 	}
++	#if defined(CONFIG_SCHED_DIAG)
++        if (new_thread != prev) {
++            sched_diag_on_context_switch(prev, new_thread);
++        }
++        #endif
++
+ 	z_current_thread_set(new_thread);
+ }
+ 
+@@ -854,17 +1080,24 @@ static inline void set_current(struct k_thread *new_thread)
+ void *z_get_next_switch_handle(void *interrupted)
+ {
+ 	z_check_stack_sentinel();
+-
++	printk("before smp\n");
+ #ifdef CONFIG_SMP
+ 	void *ret = NULL;
+-
++	printk("smp\n");
+ 	K_SPINLOCK(&_sched_spinlock) {
+ 		struct k_thread *old_thread = _current, *new_thread;
++		old_thread->switch_handle = NULL;
++		new_thread = next_up();
+ 
+-		__ASSERT(old_thread->switch_handle == NULL || is_thread_dummy(old_thread),
+-			"old thread handle should be null.");
++		#ifdef CONFIG_SCHED_CFS
++			/* Update outgoing thread's vruntime */
++			z_sched_cfs_thread_switch_out(old_thread);
++		#endif
+ 
+-		new_thread = next_up();
++
++		#if defined(CONFIG_SCHED_DIAG)
++        	sched_diag_on_context_switch(old_thread, new_thread);
++		#endif
+ 
+ 		z_sched_usage_switch(new_thread);
+ 
+@@ -880,6 +1113,11 @@ void *z_get_next_switch_handle(void *interrupted)
+ 			new_thread->base.cpu = cpu_id;
+ 			set_current(new_thread);
+ 
++			#ifdef CONFIG_SCHED_CFS
++				/* Start tracking new thread */
++				z_sched_cfs_thread_switch_in(new_thread);
++			#endif
++
+ #ifdef CONFIG_TIMESLICING
+ 			z_reset_time_slice(new_thread);
+ #endif /* CONFIG_TIMESLICING */
+@@ -918,6 +1156,18 @@ void *z_get_next_switch_handle(void *interrupted)
+ 	return ret;
+ #else
+ 	z_sched_usage_switch(_kernel.ready_q.cache);
++
++	#ifdef CONFIG_SCHED_CFS
++		if (_current != _kernel.ready_q.cache) {
++			z_sched_cfs_thread_switch_out(_current);
++			z_sched_cfs_thread_switch_in(_kernel.ready_q.cache);
++		}
++	#endif
++
++	#if defined(CONFIG_SCHED_DIAG)
++    	sched_diag_on_context_switch(_current, _kernel.ready_q.cache);
++	#endif
++
+ 	_current->switch_handle = interrupted;
+ 	set_current(_kernel.ready_q.cache);
+ 	return _current->switch_handle;
+@@ -1012,7 +1262,7 @@ void z_impl_k_thread_absolute_deadline_set(k_tid_t tid, int deadline)
+ void z_impl_k_thread_deadline_set(k_tid_t tid, int deadline)
+ {
+ 
+-	deadline = clamp(deadline, 0, INT_MAX);
++	deadline = CLAMP(deadline, 0, INT_MAX);
+ 
+ 	int32_t newdl = k_cycle_get_32() + deadline;
+ 
+@@ -1146,7 +1396,7 @@ int32_t z_impl_k_sleep(k_timeout_t timeout)
+ 
+ 	/* k_sleep() still returns 32 bit milliseconds for compatibility */
+ 	int64_t ms = K_TIMEOUT_EQ(timeout, K_FOREVER) ? K_TICKS_FOREVER :
+-		clamp(k_ticks_to_ms_ceil64(ticks), 0, INT_MAX);
++		CLAMP(k_ticks_to_ms_ceil64(ticks), 0, INT_MAX);
+ 
+ 	SYS_PORT_TRACING_FUNC_EXIT(k_thread, sleep, timeout, ms);
+ 	return (int32_t) ms;
+@@ -1321,11 +1571,10 @@ static ALWAYS_INLINE void halt_thread(struct k_thread *thread, uint8_t new_state
+ 		 * handle for any threads spinning in join() (this can
+ 		 * never be used, as our thread is flagged dead, but
+ 		 * it must not be NULL otherwise join can deadlock).
+-		 * Use 1 as a clearly invalid but non-NULL value.
+ 		 */
+ 		if (dummify && !IS_ENABLED(CONFIG_ARCH_POSIX)) {
+ #ifdef CONFIG_USE_SWITCH
+-			_current->switch_handle = (void *)1;
++			_current->switch_handle = _current;
+ #endif
+ 			z_dummy_thread_init(&_thread_dummy);
+ 
+diff --git a/kernel/thread.c b/kernel/thread.c
+index 307f1d731e6..2ae82d9e289 100644
+--- a/kernel/thread.c
++++ b/kernel/thread.c
+@@ -707,6 +707,10 @@ char *z_setup_new_thread(struct k_thread *new_thread,
+ #endif /* CONFIG_SCHED_DEADLINE */
+ 	new_thread->resource_pool = _current->resource_pool;
+ 
++#ifdef CONFIG_SCHED_CFS
++	z_sched_cfs_thread_init(new_thread);
++#endif
++
+ #ifdef CONFIG_SMP
+ 	z_waitq_init(&new_thread->halt_queue);
+ #endif /* CONFIG_SMP */
+diff --git a/kernel/timeout.c b/kernel/timeout.c
+index e9e4f86a850..df8b51ebf22 100644
+--- a/kernel/timeout.c
++++ b/kernel/timeout.c
+@@ -53,6 +53,17 @@ static struct _timeout *next(struct _timeout *t)
+ 
+ static void remove_timeout(struct _timeout *t)
+ {
++	// printk("remove_timeout: t=%p\n", t);
++	// if (t) {
++	// 	printk("  t->node.next=%p\n", t->node.next);
++	// 	printk("  t->node.prev=%p\n", t->node.prev);
++	// }
++
++	// if (t->node.next == NULL || t->node.prev == NULL) {
++	// 	printk("  WARNING: Timeout already removed, skipping\n");
++	// 	return;  // Already removed, don't crash
++	// }
++
+ 	if (next(t) != NULL) {
+ 		next(t)->dticks += t->dticks;
+ 	}
+diff --git a/kernel/timeslicing.c b/kernel/timeslicing.c
+index c0ba534d59a..7f430c941ff 100644
+--- a/kernel/timeslicing.c
++++ b/kernel/timeslicing.c
+@@ -7,6 +7,7 @@
+ #include <kswap.h>
+ #include <ksched.h>
+ #include <ipi.h>
++#include <zephyr/sched_diag.h>
+ 
+ static int slice_ticks = DIV_ROUND_UP(CONFIG_TIMESLICE_SIZE * Z_HZ_ticks, Z_HZ_ms);
+ static int slice_max_prio = CONFIG_TIMESLICE_PRIORITY;
+@@ -105,6 +106,19 @@ void z_time_slice(void)
+ 	k_spinlock_key_t key = k_spin_lock(&_sched_spinlock);
+ 	struct k_thread *curr = _current;
+ 
++#ifdef CONFIG_SCHED_CFS
++	// /* Update current thread's vruntime */
++	// z_sched_cfs_tick_update(curr);
++	
++	// /* Check if CFS preemption is needed */
++	// if (!z_is_idle_thread_object(curr) && z_sched_cfs_should_preempt(curr)) {
++	// 	move_thread_to_end_of_prio_q(curr);
++	// 	// update_cache(1);
++	// 	k_spin_unlock(&_sched_spinlock, key);
++	// 	return;
++	// }
++#endif
++
+ #ifdef CONFIG_SWAP_NONATOMIC
+ 	if (pending_current == curr) {
+ 		z_reset_time_slice(curr);
+@@ -123,7 +137,7 @@ void z_time_slice(void)
+ 		}
+ #endif
+ 		if (!z_is_thread_prevented_from_running(curr)) {
+-			move_current_to_end_of_prio_q();
++			move_thread_to_end_of_prio_q(curr);
+ 		}
+ 		z_reset_time_slice(curr);
+ 	}
