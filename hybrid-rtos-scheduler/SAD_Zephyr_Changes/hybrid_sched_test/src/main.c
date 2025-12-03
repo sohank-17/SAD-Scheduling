@@ -4,7 +4,7 @@
 #include <zephyr/sched_diag.h>
 #include <zephyr/random/random.h>
 
-#define MAX_TASKS 8
+#define MAX_TASKS 20
 #define LOG_MAX   512
 
 typedef struct {
@@ -95,7 +95,17 @@ static task_cfg_t TASKS[] = {
     { .id=1, .period_ms=60,  .wcet_ms=12,  .deadline_ms=60,  .critical=1 }, // RT
     { .id=2, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
     { .id=3, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
-};
+    { .id=4, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
+    { .id=5, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
+    { .id=6, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
+    { .id=7, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
+    { .id=6, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
+    { .id=7, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
+    { .id=8, .period_ms=50,  .wcet_ms=8,   .deadline_ms=50,  .critical=1 }, // RT
+    { .id=9, .period_ms=60,  .wcet_ms=12,  .deadline_ms=60,  .critical=1 }, // RT
+    { .id=10, .period_ms=50,  .wcet_ms=8,   .deadline_ms=50,  .critical=1 }, // RT
+    { .id=11, .period_ms=60,  .wcet_ms=12,  .deadline_ms=6000,  .critical=1 }, // RT
+    };
 
 void main(void) {
     printk("*** hybrid_sched_test start ***\n");
