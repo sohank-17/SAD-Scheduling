@@ -77,7 +77,8 @@ def readTextFile(infile_path):
                     "start_ms": int(data[3]),
                     "finish_ms": int(data[4]),
                     "deadline_ms": int(data[5]),
-                    "deadline_met": int(data[6])
+                    "critical": int(data[6]),
+                    "deadline_met": int(data[7])
                 }
                 task_no = data[0]
                 if task_no in processes_data:
@@ -131,7 +132,7 @@ def calculations_and_graphs(kernel_data, processes_data):
             if (proc[j]["deadline_met"] == 0):
                 deadlines_missed += 1
 
-            if (proc[j]["task_id"] < 10):
+            if (proc[j]["critical"] == 1):
                 critical_deadlines_missed[1] += 1
                 if (proc[j]["deadline_met"] == 0):
                     critical_deadlines_missed[0] += 1
