@@ -4,9 +4,10 @@
 #include <zephyr/sched_diag.h>
 #include <zephyr/random/random.h>
 
-#define MAX_TASKS 20
+#define MAX_TASKS 30
 #define LOG_MAX   512
 
+bool _done = false;
 typedef struct {
     int      id;
     uint32_t period_ms;
@@ -19,6 +20,7 @@ typedef struct {
     int      task_id, job_id;
     uint32_t release_ms, start_ms, finish_ms, deadline_abs_ms;
     int      met_deadline;  // 1 if finish <= deadline_abs
+    int     critical;
 } job_log_t;
 
 static job_log_t g_logs[LOG_MAX];
@@ -41,10 +43,10 @@ static void task_entry(void *p1, void *p2, void *p3) {
     uint32_t next_release = now_ms();
 
     /* run a fixed number of jobs per task for now */
-    while (job < 10) {
+    while (!_done) {
         /* Periodic release */
 	uint32_t jitter = sys_rand32_get() % 10; // up to 10 ms
-        //next_release += cfg.period_ms + jitter;
+        next_release += cfg.period_ms + jitter;
         next_release += cfg.period_ms;
         k_sleep(K_MSEC(jitter));                  // random offset
 
@@ -75,6 +77,7 @@ static void task_entry(void *p1, void *p2, void *p3) {
                 .start_ms = start_ts,
                 .finish_ms = finish_ts,
                 .deadline_abs_ms = deadline_abs,
+                .critical = cfg.critical,
                 .met_deadline = met
             };
         }
@@ -91,31 +94,36 @@ static struct k_thread task_threads[MAX_TASKS];
 /* Initial workload (tweak freely) */
 static task_cfg_t TASKS[] = {
     // id, period, wcet, deadline, critical
-    { .id=0, .period_ms=50,  .wcet_ms=8,   .deadline_ms=50,  .critical=1 }, // RT
-    { .id=1, .period_ms=60,  .wcet_ms=12,  .deadline_ms=60,  .critical=1 }, // RT
-    { .id=2, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
-    { .id=3, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
-    { .id=4, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
-    { .id=5, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
-    { .id=6, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
-    { .id=7, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
-    { .id=6, .period_ms=400, .wcet_ms=250, .deadline_ms=400, .critical=0 }, // long BE
-    { .id=7, .period_ms=420, .wcet_ms=260, .deadline_ms=420, .critical=0 }, // long BE
-    { .id=8, .period_ms=50,  .wcet_ms=8,   .deadline_ms=50,  .critical=1 }, // RT
-    { .id=9, .period_ms=60,  .wcet_ms=12,  .deadline_ms=60,  .critical=1 }, // RT
-    { .id=10, .period_ms=50,  .wcet_ms=8,   .deadline_ms=50,  .critical=1 }, // RT
-    { .id=11, .period_ms=60,  .wcet_ms=12,  .deadline_ms=6000,  .critical=1 }, // RT
+    { .id=0, .period_ms=40,  .wcet_ms=1,   .deadline_ms=48,  .critical=1 }, // RT
+    { .id=1, .period_ms=40,  .wcet_ms=3,  .deadline_ms=48,  .critical=1 }, // RT
+    { .id=2, .period_ms=50,  .wcet_ms=3,   .deadline_ms=58,  .critical=1 }, // RT
+    { .id=3, .period_ms=70,  .wcet_ms=5,  .deadline_ms=80,  .critical=1 }, // RT
+    { .id=4, .period_ms=40, .wcet_ms=25, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=5, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=6, .period_ms=40, .wcet_ms=25, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=7, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=8, .period_ms=40, .wcet_ms=25, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=9, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=10, .period_ms=40, .wcet_ms=25, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=11, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=12, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=13, .period_ms=40, .wcet_ms=25, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=14, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=15, .period_ms=40, .wcet_ms=25, .deadline_ms=200, .critical=0 }, // long BE
+    { .id=16, .period_ms=42, .wcet_ms=26, .deadline_ms=200, .critical=0 }, // long BE
     };
 
 void main(void) {
+    int main_prio = k_thread_priority_get(k_current_get());
     printk("*** hybrid_sched_test start ***\n");
+    printk("Number of CPUs: %d\n", arch_num_cpus());
     sched_diag_reset();
 
     int n = ARRAY_SIZE(TASKS);
+    k_tid_t tid[ARRAY_SIZE(TASKS)];
     for (int i = 0; i < n; i++) {
-        int prio = TASKS[i].critical ? 0 : 4;  /* Zephyr: lower (more negative) = higher priority */
-        printk("*** Creating Thread ***\n");
-        k_tid_t tid = k_thread_create(
+        int prio = TASKS[i].critical ? -20 : 10;  /* Zephyr: lower (more negative) = higher priority */
+            tid[i] = k_thread_create(
             &task_threads[i],
             task_stacks[i], K_THREAD_STACK_SIZEOF(task_stacks[i]),
             task_entry, &TASKS[i], NULL, NULL,
@@ -123,23 +131,26 @@ void main(void) {
         );
         char name[16];
         snprintk(name, sizeof(name), "task_%d", TASKS[i].id);
-        k_thread_name_set(tid, name);
-	k_sleep(K_MSEC(20));  // stagger thread starts
+        k_thread_name_set(tid[i], name);
+	// k_sleep(K_MSEC(20));  // stagger thread starts
     }
-    printk("here\n");
-
+    k_sleep(K_MSEC(30000));
+    _done = true;
+    for(int i = 0; i < n; i++) {
+        k_thread_join(tid[i], K_FOREVER);
+    }
     /* Allow jobs to finish. Rough upper bound; adjust as needed. */
     k_sleep(K_SECONDS(5));
 
     /* Emit CSV once to minimize runtime perturbation */
-    printk("task_id,job_id,release_ms,start_ms,finish_ms,deadline_ms,met\n");
+    printk("task_id,job_id,release_ms,start_ms,finish_ms,deadline_ms,critical,met\n");
     k_mutex_lock(&log_mutex, K_FOREVER);
     for (int i = 0; i < g_log_count; i++) {
         job_log_t *r = &g_logs[i];
-        printk("%d,%d,%u,%u,%u,%u,%d\n",
+        printk("%d,%d,%u,%u,%u,%u,%d,%d\n",
                r->task_id, r->job_id,
                r->release_ms, r->start_ms, r->finish_ms,
-               r->deadline_abs_ms, r->met_deadline);
+               r->deadline_abs_ms, r->critical, r->met_deadline);
     }
     k_mutex_unlock(&log_mutex);
 
