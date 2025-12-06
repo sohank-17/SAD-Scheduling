@@ -166,12 +166,9 @@ def calculations_and_graphs(kernel_data, processes_data):
              "Median Wait Time (ms)" : median_wait_overall,
              "Meds per Task (ms)": median_wait_process,
              "Max Number of Tasks in Queue" : kernel_data[0]["readyq_max"],
-             "Tasks in Queue at Completion": kernel_data[0]["readyq_cur"]}
-    #for i in range(0, len(average_wait_process)):
-    #    stats["Avg per Task: T" + str(i)] = average_wait_process[i]
-    #for i in range(0, len(median_wait_process)):
-    #    stats["Med per Task: T" + str(i)] = median_wait_process[i]
-
+             "Tasks in Queue at Completion": kernel_data[0]["readyq_cur"],
+             "Total preemptions": kernel_data[0]["preempt"],
+             "Total context switches": kernel_data[0]["ctx"]}
 
     for i in range(0, len(processes_data)):
         plt.plot(range(0, len(wait_time[i])), wait_time[i])
